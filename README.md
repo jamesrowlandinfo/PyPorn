@@ -39,18 +39,33 @@ Before you can unleash this digital beast, you need to set up your Termux enviro
 
    Follow the prompts to grant permission.
  * Download the Script:
-   You can either copy the script content directly into a file named PyPorn.py (or PyPorn1.8.py if you prefer to keep versioning) in your Termux home directory, or use wget if you host it somewhere.
-   # Example if you copy-paste the content into a file:
-nano PyPorn.py
+   You have a few options to get the script onto your device:
+   * Option 1: Using git clone (Recommended for easy updates)
+     First, install git if you haven't already:
+     pkg install git
+
+     Then, clone the repository:
+     git clone https://github.com/jamesrowlandinfo/PyPorn.git
+
+     This will create a PyPorn directory in your current location containing the script.
+   * Option 2: Manual Copy-Paste (for single file)
+     If you prefer, you can copy the script content directly into a file.
+     nano PyPorn.py
 # Paste the script content, then Ctrl+X, Y, Enter to save.
 
+     (Note: If you use this method, you'll need to manually update the file for new versions.)
 Usage
- * Navigate to the script directory (if not in home):
+ * Navigate to the script directory:
+   If you used git clone, navigate into the PyPorn directory:
+   cd PyPorn
+
+   If you manually saved PyPorn.py in your home directory:
    cd ~/
 
-   (Assuming you saved it in your home directory)
  * Run the script:
-   python PyPorn.py
+   python PyPorn_1.5.0.py
+# Or if you renamed it to PyPorn.py:
+# python PyPorn.py
 
  * Follow the on-screen prompts:
    * Enter the URL of the video or playlist you want to download.
