@@ -2,12 +2,12 @@ import os
 import subprocess
 import sys
 import json
-
+from pydub import AudioSegment
+from pydub.silence import split_on_silence
 
 # --- GLOBAL DEBUG SETTING ---
-DEBUG_MODE = True # Set to False to disable verbose JSON output
+DEBUG_MODE = True  # Set to False to disable verbose JSON output
 # --- END GLOBAL DEBUG SETTING ---
-
 
 def check_yt_dlp():
     """
@@ -20,7 +20,6 @@ def check_yt_dlp():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-
 def check_ffmpeg():
     """
     Checks if ffmpeg is installed and executable by trying to get its version.
@@ -32,6 +31,16 @@ def check_ffmpeg():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
+def check_pydub():
+    """
+    Checks if pydub is installed.
+    Returns True if found, False otherwise.
+    """
+    try:
+        import pydub
+        return True
+    except ImportError:
+        return False
 
 def get_media_info(url, username=None, password=None, cookie_file=None):
     """
@@ -54,8 +63,8 @@ def get_media_info(url, username=None, password=None, cookie_file=None):
         '--dump-json',
         '--no-warnings',
         '--no-simulate',
-        '--extractor-retries', '3',  # Retry failed extractor attempts up to 3 times
-        '--socket-timeout', '10',    # Set socket timeout to 10 seconds
+        '--extractor-retries', '3',
+        '--socket-timeout', '10',
         url
     ]
 
@@ -64,22 +73,19 @@ def get_media_info(url, username=None, password=None, cookie_file=None):
     if cookie_file:
         base_command.extend(['--cookies', cookie_file])
 
-    # --- ADVANCED LOGIC FOR YOUTUBE EXTRACTOR HANDLING ---
     if "youtube.com" in url or "youtu.be" in url:
-        # List of YouTube player clients to try, from most common to less common.
-        # Different clients can sometimes bypass specific YouTube anti-bot measures.
         yt_player_clients_to_try = [
-            'youtube',               # Default YouTube extractor
-            'youtube:player_client=android', # Android client
-            'youtube:player_client=web',     # Web client
-            'youtube:player_client=web_public', # Public web client
-            'youtube:player_client=ios'      # iOS client
+            'youtube',
+            'youtube:player_client=android',
+            'youtube:player_client=web',
+            'youtube:player_client=web_public',
+            'youtube:player_client=ios'
         ]
 
         for extractor_arg in yt_player_clients_to_try:
             current_command = base_command + ['--extractor-args', extractor_arg]
             try:
-                print(f"Attempting with YouTube-DL ({extractor_arg}) extractor...")
+                print(f"Attempting to fetch media info with {extractor_arg} extractor...")
                 result = subprocess.run(
                     current_command,
                     check=True,
@@ -89,28 +95,21 @@ def get_media_info(url, username=None, password=None, cookie_file=None):
                 )
                 info = json.loads(result.stdout)
                 
-                # --- DEBUG OUTPUT ---
                 if DEBUG_MODE:
                     print(f"--- DEBUG: Raw info from yt-dlp (Extractor: {extractor_arg}): {json.dumps(info, indent=2)}")
-                # --- END DEBUG OUTPUT ---
-
-                return info, None # Success, return info
+                
+                return info, None
             except (subprocess.CalledProcessError, json.JSONDecodeError, Exception) as e:
-                # If an extractor fails, print the error and try the next one.
-                print(f"YouTube-DL ({extractor_arg}) extractor failed: {e}.")
+                print(f"Failed with {extractor_arg} extractor: {e}")
                 if extractor_arg == yt_player_clients_to_try[-1]:
-                    # If this is the last YouTube-specific extractor, indicate fallback.
-                    print("All YouTube-specific extractors failed. Falling back to generic with impersonate...")
+                    print("All YouTube-specific extractors failed. Falling back to generic extractor...")
                 else:
                     print("Trying next YouTube extractor...")
-                pass # Continue to the next extractor or fall through
+                pass
 
-
-    # Generic command with impersonate (default for non-YouTube or fallback if all YouTube-specific fail)
-    # This also includes common retry/timeout args from base_command
     generic_command = base_command + ['--extractor-args', 'generic:impersonate']
     try:
-        print("Attempting with generic:impersonate extractor...")
+        print("Attempting to fetch media info with generic:impersonate extractor...")
         result = subprocess.run(
             generic_command,
             check=True,
@@ -120,19 +119,16 @@ def get_media_info(url, username=None, password=None, cookie_file=None):
         )
         info = json.loads(result.stdout)
         
-        # --- DEBUG OUTPUT ---
         if DEBUG_MODE:
             print(f"--- DEBUG: Raw info from yt-dlp (Extractor: generic:impersonate): {json.dumps(info, indent=2)}")
-        # --- END DEBUG OUTPUT ---
-
+        
         return info, None
     except subprocess.CalledProcessError as e:
-        return None, f"Error fetching media info. yt-dlp output:\n{e.stderr}"
+        return None, f"Error fetching media info: {e.stderr}"
     except json.JSONDecodeError:
-        return None, "Error parsing media info (invalid JSON response from yt-dlp)."
+        return None, "Error parsing media info: Invalid JSON response from yt-dlp."
     except Exception as e:
         return None, f"An unexpected error occurred: {e}"
-
 
 def get_available_video_formats(info):
     """
@@ -148,48 +144,41 @@ def get_available_video_formats(info):
     options = []
     unique_heights = set()
 
-    # Iterate through formats to find specific heights (if 'formats' key exists and is not empty)
-    # .get('formats', []) ensures this loop doesn't crash if 'formats' key is missing.
-    for f in info.get('formats', []): 
+    for f in info.get('formats', []):
         if f.get('vcodec') != 'none' and f.get('height'):
             height = f['height']
             unique_heights.add(height)
     
-    # Add specific resolutions found
     for height in sorted(list(unique_heights), reverse=True):
         format_string = f"bestvideo[height={height}]+bestaudio/best[height={height}]"
-        options.append((f"{height}p", format_string)) # Display as "720p", "1080p" etc.
+        options.append((f"{height}p", format_string))
     
-    # CRITICAL FIX: If the media is identified as a video AND no specific height formats were found,
-    # then always add "Best available quality" as a fallback.
-    # This handles cases like Motherless where 'formats' might be missing from --dump-json output,
-    # but yt-dlp can still download the video using the 'best' format specifier.
     if info.get('_type') == 'video' and not options:
-        options.append(("Best available quality", "best")) 
+        options.append(("Best available quality", "best"))
     
     return options
 
-
 def download_media(url, format_string, output_dir, media_type, playlist_items=None, username=None, password=None, cookie_file=None, save_cookies_to=None):
     """
-    Downloads media (video, audio, or images) using yt-dlp.
-    It streams yt-dlp's progress directly to the console.
+    Downloads media (video or audio) using yt-dlp.
+    Streams yt-dlp's progress directly to the console.
    
     Args:
         url (str): The URL of the media to download.
-        format_string (str): The yt-dlp format string (e.g., '247+bestaudio', or specific flags for images/audio).
-                             Can be None for audio/image.
+        format_string (str): The yt-dlp format string (e.g., '247+bestaudio', or None for audio).
         output_dir (str): The directory where the media should be saved.
-        media_type (str): 'video', 'audio', or 'image' to determine yt-dlp flags.
+        media_type (str): 'video' or 'audio' to determine yt-dlp flags.
         playlist_items (str, optional): A comma-separated string of playlist item numbers (e.g., "1,3,5").
-                                        Used with --playlist-items. Defaults to None (all items or single).
         username (str, optional): Username for login. Defaults to None.
         password (str, optional): Password for login. Defaults to None.
         cookie_file (str, optional): Path to a cookie file. Defaults to None.
         save_cookies_to (str, optional): Path to save cookies after successful login. Defaults to None.
+
+    Returns:
+        list: List of paths to downloaded files, or empty list if download fails.
     """
-    # Define the output file template.
     output_template = os.path.join(output_dir, '%(title)s.%(ext)s')
+    downloaded_files = []
     
     command = ['yt-dlp']
     
@@ -197,68 +186,219 @@ def download_media(url, format_string, output_dir, media_type, playlist_items=No
         command.extend(['-f', format_string])
     elif media_type == 'audio':
         command.extend(['-x', '--audio-format', 'mp3', '--audio-quality', '0'])
-        output_template = os.path.join(output_dir, '%(title)s.mp3') # Ensure .mp3 extension
+        output_template = os.path.join(output_dir, '%(title)s.mp3')
     
-    # Add login/cookie flags
     if username and password:
         command.extend(['--username', username, '--password', password])
         if save_cookies_to:
-            command.extend(['--write-cookies', save_cookies_to]) # Save cookies after successful login
+            command.extend(['--write-cookies', save_cookies_to])
     elif cookie_file:
         command.extend(['--cookies', cookie_file])
 
-    # Add --playlist-items if specific items are selected
     if playlist_items:
         command.extend(['--playlist-items', playlist_items])
-        # Add sleep interval for playlists to avoid rate limiting
-        command.extend(['--sleep-interval', '5']) # Sleep 5 seconds between each video in a playlist
-        # Add throttled rate for playlists to simulate slower download, can help with anti-bot
-        command.extend(['--throttled-rate', '500K']) # Limit to 500 KB/s
-        print("\nNOTE: For playlists, a 5-second delay is added between videos and download rate is throttled to 500KB/s to avoid YouTube's anti-bot measures.") # User-interactive dialect
+        command.extend(['--sleep-interval', '5'])
+        command.extend(['--throttled-rate', '500K'])
+        print("\nNote: For playlists, a 5-second delay is added between videos, and the download rate is limited to 500KB/s to help avoid rate-limiting issues.")
     
     command.extend([
         '-o', output_template,
         '--progress',
-        '--extractor-retries', '3',  # Retry failed download attempts up to 3 times
-        '--socket-timeout', '10',    # Set socket timeout to 10 seconds
-        '--fragment-retries', '10',  # Add fragment retries for broken downloads
+        '--extractor-retries', '3',
+        '--socket-timeout', '10',
+        '--fragment-retries', '10',
         url
     ])
 
-    # Extractor logic for download command, mirroring get_media_info's primary attempt
     if "youtube.com" in url or "youtu.be" in url:
-        # Use the 'android' client for download by default for YouTube, as it's often robust.
-        # If this fails, the user will see the error and we can adjust.
         command.extend(['--extractor-args', 'youtube:player_client=android'])
     else:
-        command.extend(['--extractor-args', 'generic:impersonate']) # Use impersonate for others
-
+        command.extend(['--extractor-args', 'generic:impersonate'])
 
     try:
-        print(f"\nAlright, you pathetic excuse for a human, I'm trying to download this {media_type} from: {url}") # User-interactive dialect
+        print(f"\nStarting {media_type} download from: {url}")
         if playlist_items:
-            print(f"  You picked these specific pieces of shit: {playlist_items}") # User-interactive dialect
-            print("  WARNING: YouTube playlists can be difficult to download due to aggressive anti-bot measures. If this fails, try individual videos.") # User-interactive dialect
-        print(f"Saving this garbage to: {output_dir}") # User-interactive dialect
+            print(f"Selected playlist items: {playlist_items}")
+            print("Note: Downloading playlists may encounter issues due to rate-limiting protections. If this fails, consider downloading individual items.")
+        print(f"Saving to: {output_dir}")
        
         process = subprocess.Popen(command, stdout=sys.stdout, stderr=sys.stderr)
         process.wait()
        
         if process.returncode == 0:
-            print(f"\n{media_type.capitalize()} download complete! Don't thank me, you worthless sack of shit.") # User-interactive dialect
+            print(f"\n{media_type.capitalize()} download completed successfully!")
+            if media_type == 'audio':
+                if playlist_items:
+                    for idx in parse_selection(playlist_items, 9999).split(',') if playlist_items else ['']:
+                        for f in os.listdir(output_dir):
+                            if f.endswith('.mp3') and os.path.isfile(os.path.join(output_dir, f)):
+                                downloaded_files.append(os.path.join(output_dir, f))
+                else:
+                    for f in os.listdir(output_dir):
+                        if f.endswith('.mp3') and os.path.isfile(os.path.join(output_dir, f)):
+                            downloaded_files.append(os.path.join(output_dir, f))
         else:
-            print(f"\nError during {media_type} download. yt-dlp choked with code {process.returncode}. What did you expect, you imbecile?") # User-interactive dialect
-            print("Go check the URL, your internet connection, and ensure dependencies (ffmpeg, httpx, h2) are installed.") # User-interactive dialect
+            print(f"\nError during {media_type} download. yt-dlp returned error code {process.returncode}.")
+            print("Please verify the URL, your internet connection, and ensure dependencies (ffmpeg, httpx, h2) are installed.")
             if username and password:
-                print("Also, check your login credentials. You might be a dumbass and typed them wrong.") # User-interactive dialect
+                print("Additionally, please check your login credentials for accuracy.")
+            return []
            
     except FileNotFoundError:
-        print("Error: I can't find 'yt-dlp', you useless piece of trash. Did you even bother to install it?") # User-interactive dialect
+        print("Error: yt-dlp is not installed or not found in your system's PATH.")
         if media_type == 'audio' or media_type == 'video':
-            print("And if you're trying to get audio or certain video formats, you probably need 'ffmpeg' too, you moron. Try: pkg install ffmpeg") # User-interactive dialect
+            print("For audio or certain video formats, ffmpeg is also required. Install it with: pkg install ffmpeg")
+        return []
     except Exception as e:
-        print(f"Oh, look at that! Something fucked up during your {media_type} download: {e}. You probably broke it, retard.") # User-interactive dialect
+        print(f"An unexpected error occurred during {media_type} download: {e}")
+        return []
+    
+    return downloaded_files
 
+def split_audio_by_chunk(audio_file, output_dir, chunk_length_ms):
+    """
+    Splits an audio file into equal chunks of specified length using pydub.
+    
+    Args:
+        audio_file (str): Path to the audio file to split.
+        output_dir (str): Directory to save split chunks.
+        chunk_length_ms (int): Length of each chunk in milliseconds.
+    """
+    try:
+        print(f"Splitting audio into chunks of {chunk_length_ms / 60000:.1f} minutes...")
+        chunk_dir = os.path.join(output_dir, "split_chunks")
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        audio = AudioSegment.from_file(audio_file)
+        duration_ms = len(audio)
+        chunks = [audio[i:i + chunk_length_ms] for i in range(0, duration_ms, chunk_length_ms)]
+
+        for i, chunk in enumerate(chunks):
+            chunk_name = os.path.join(chunk_dir, f"{os.path.splitext(os.path.basename(audio_file))[0]}_chunk{i+1}.mp3")
+            chunk.export(chunk_name, format="mp3")
+            print(f"Saved chunk: {chunk_name}")
+
+        print(f"\nAudio successfully split into {len(chunks)} chunks in: {chunk_dir}")
+    except Exception as e:
+        print(f"Error splitting audio by chunk length: {e}")
+
+def split_audio_by_silence(audio_file, output_dir, min_silence_len=500, silence_thresh=-40, min_chunk_length_ms=300000):
+    """
+    Splits an audio file based on silence detection using pydub.
+    
+    Args:
+        audio_file (str): Path to the audio file to split.
+        output_dir (str): Directory to save split chunks.
+        min_silence_len (int): Minimum length of silence in milliseconds to detect a split.
+        silence_thresh (int): Silence threshold in dBFS (e.g., -40 dBFS).
+        min_chunk_length_ms (int): Minimum length of chunks in milliseconds (default: 5 minutes).
+    """
+    try:
+        print(f"Splitting audio by silence detection...")
+        chunk_dir = os.path.join(output_dir, "split_chunks")
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        audio = AudioSegment.from_file(audio_file)
+        chunks = split_on_silence(
+            audio,
+            min_silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            keep_silence=200
+        )
+
+        filtered_chunks = [chunk for chunk in chunks if len(chunk) >= min_chunk_length_ms]
+        if not filtered_chunks:
+            print("No chunks meet the minimum length requirement. Try adjusting silence parameters.")
+            return
+
+        for i, chunk in enumerate(filtered_chunks):
+            chunk_name = os.path.join(chunk_dir, f"{os.path.splitext(os.path.basename(audio_file))[0]}_chunk{i+1}.mp3")
+            chunk.export(chunk_name, format="mp3")
+            print(f"Saved chunk: {chunk_name}")
+
+        print(f"\nAudio successfully split into {len(filtered_chunks)} chunks in: {chunk_dir}")
+    except Exception as e:
+        print(f"Error splitting audio by silence: {e}")
+
+def split_audio_by_silence_then_chunks(audio_file, output_dir, chunk_length_ms, min_silence_len=500, silence_thresh=-40):
+    """
+    Splits an audio file by removing silence, then splits the concatenated non-silent audio into equal chunks.
+    
+    Args:
+        audio_file (str): Path to the audio file to split.
+        output_dir (str): Directory to save split chunks.
+        chunk_length_ms (int): Length of each chunk in milliseconds after silence removal.
+        min_silence_len (int): Minimum length of silence in milliseconds to detect.
+        silence_thresh (int): Silence threshold in dBFS (e.g., -40 dBFS).
+    """
+    try:
+        print(f"Removing silence and splitting into chunks of {chunk_length_ms / 60000:.1f} minutes...")
+        chunk_dir = os.path.join(output_dir, "split_chunks")
+        os.makedirs(chunk_dir, exist_ok=True)
+
+        audio = AudioSegment.from_file(audio_file)
+        non_silent_chunks = split_on_silence(
+            audio,
+            min_silence_len=min_silence_len,
+            silence_thresh=silence_thresh,
+            keep_silence=200
+        )
+
+        if not non_silent_chunks:
+            print("No non-silent segments detected. Try adjusting silence parameters.")
+            return
+
+        concatenated_audio = AudioSegment.empty()
+        for chunk in non_silent_chunks:
+            concatenated_audio += chunk
+
+        duration_ms = len(concatenated_audio)
+        if duration_ms < chunk_length_ms:
+            print(f"Error: After removing silence, audio duration ({duration_ms / 1000:.1f}s) is shorter than requested chunk length ({chunk_length_ms / 1000:.1f}s).")
+            return
+
+        chunks = [concatenated_audio[i:i + chunk_length_ms] for i in range(0, duration_ms, chunk_length_ms)]
+
+        for i, chunk in enumerate(chunks):
+            chunk_name = os.path.join(chunk_dir, f"{os.path.splitext(os.path.basename(audio_file))[0]}_chunk{i+1}.mp3")
+            chunk.export(chunk_name, format="mp3")
+            print(f"Saved chunk: {chunk_name}")
+
+        print(f"\nAudio successfully split into {len(chunks)} chunks after silence removal in: {chunk_dir}")
+    except Exception as e:
+        print(f"Error splitting audio by silence then chunks: {e}")
+
+def select_audio_file(output_dir):
+    """
+    Lists MP3 files in the output directory and allows the user to select one for splitting.
+    
+    Args:
+        output_dir (str): Directory to search for MP3 files.
+
+    Returns:
+        str: Path to the selected audio file, or None if no file is selected or available.
+    """
+    mp3_files = [f for f in os.listdir(output_dir) if f.endswith('.mp3') and os.path.isfile(os.path.join(output_dir, f))]
+    if not mp3_files:
+        print("No MP3 files found in the output directory.")
+        return None
+
+    print("\nAvailable MP3 files:")
+    for i, f in enumerate(mp3_files, 1):
+        print(f"{i}. {f}")
+
+    while True:
+        try:
+            choice = input("Select a file number (or 'q' to cancel): ").strip()
+            if choice.lower() == 'q':
+                return None
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(mp3_files):
+                return os.path.join(output_dir, mp3_files[choice_idx])
+            else:
+                print(f"Error: Please select a number between 1 and {len(mp3_files)}.")
+        except ValueError:
+            print("Error: Please enter a valid number or 'q' to cancel.")
 
 def parse_selection(selection_str, max_items):
     """
@@ -267,7 +407,7 @@ def parse_selection(selection_str, max_items):
     """
     selection_str = selection_str.strip().lower()
     if selection_str == 'all':
-        return None # None means yt-dlp will download all by default
+        return None
     
     selected_indices = []
     parts = selection_str.split(',')
@@ -277,255 +417,64 @@ def parse_selection(selection_str, max_items):
             try:
                 start, end = map(int, part.split('-'))
                 if not (1 <= start <= end <= max_items):
-                    print(f"YOU FUCKING IDIOT! Range '{part}' is either garbage or out of bounds (1-{max_items}). Get your head out of your ass!") # User-interactive dialect
+                    print(f"Error: Range '{part}' is invalid or out of bounds (1-{max_items}). Please try again.")
                     continue
                 selected_indices.extend(range(start, end + 1))
             except ValueError:
-                print(f"ARE YOU BLIND?! The range format '{part}' is completely wrong. Learn to type before you end up dead fuckin with me.") # User-interactive dialect
+                print(f"Error: Invalid range format '{part}'. Please use a format like '1-5'.")
         else:
             try:
                 idx = int(part)
                 if not (1 <= idx <= max_items):
-                    print(f"HEY DUMBASS! {idx} is out of bounds (1-{max_items}). Pay attention!") # User-interactive dialect
+                    print(f"Error: {idx} is out of bounds (1-{max_items}). Please select a valid item.")
                     continue
                 selected_indices.append(idx)
             except ValueError:
-                print(f"WHAT THE FUCK IS WRONG WITH YOU?! That's not a valid item number '{part}'. Are you brain damaged?") # User-interactive dialect
+                print(f"Error: '{part}' is not a valid item number. Please enter a number or range.")
     
     if not selected_indices:
-        return "" # Return empty string if no valid selections, to indicate nothing to download
+        return ""
     
-    # Remove duplicates and sort
     selected_indices = sorted(list(set(selected_indices)))
     return ",".join(map(str, selected_indices))
 
-
 def main():
     """
-    Main function to run the media downloader script.
-    Handles user interaction, directory setup, and calling download functions.
+    Main function to run the Pyanide media downloader script.
+    Handles user interaction, directory setup, and calling download and splitting functions.
     """
-    print("PyPorn Media Downloader for Termux - For RETARDED  HORNY PERVERTS") # User-interactive dialect
-    print("-------------------------------------------------------") # User-interactive dialect
-    print("Prepare to download some digital filth from websites,") # User-interactive dialect
-    print("including YouTube, straight to your pathetic Termux device.") # User-interactive dialect
-    print("It's all going into ~/storage/downloads/PyPorn/. If that directory doesn't exist, I'll make it, you lazy bastard.") # User-interactive dialect
-
+    print("Welcome to Pyanide - Media Downloader and Editor for Termux")
+    print("---------------------------------------------------------")
+    print("This tool allows you to download videos and audio from various websites, including YouTube.")
+    print("You can also edit existing audio files by splitting them into chunks based on duration, silence detection, or silence removal followed by equal chunks.")
+    print("Downloads and edited files will be saved to ~/storage/downloads/Pyanide/.")
 
     if not check_yt_dlp():
-        print("\n--- LISTEN UP, DUMBASS ---") # User-interactive dialect
-        print("Error: 'yt-dlp' isn't installed or I can't find it in your system's PATH.") # User-interactive dialect
-        print("You're too stupid to run this without it. Here's how, pay attention:") # User-interactive dialect
-        print("  pkg install yt-dlp") # User-interactive dialect
-        print("Then, try running this garbage script again. Don't waste my time.") # User-interactive dialect
-        print("-----------------------------------") # User-interactive dialect
+        print("\n--- Error ---")
+        print("yt-dlp is not installed or not found in your system's PATH.")
+        print("Please install it by running: pkg install yt-dlp")
+        print("Then, try running Pyanide again.")
         return
-
 
     if not check_ffmpeg():
-        print("\n--- Hey, retard! ---") # User-interactive dialect
-        print("'ffmpeg' isn't installed or I can't find it.") # User-interactive dialect
-        print("You'll need this piece of software to rip audio or combine video/audio for some formats retard!") # User-interactive dialect
-        print("Go install it: pkg install ffmpeg") # User-interactive dialect
-        print("-----------------------------------") # User-interactive dialect
+        print("\n--- Error ---")
+        print("ffmpeg is not installed or not found.")
+        print("ffmpeg is required for audio extraction, video formats, and audio splitting.")
+        print("Please install it by running: pkg install ffmpeg")
         return
     
-
+    if not check_pydub():
+        print("\n--- Error ---")
+        print("pydub is not installed.")
+        print("pydub is required for audio splitting functionality.")
+        print("Please install it by running: pip install pydub")
+        return
+    
     output_base_dir = os.path.expanduser('~/storage/downloads')
-    target_dir = os.path.join(output_base_dir, 'PyPorn')
-
+    target_dir = os.path.join(output_base_dir, 'Pyanide')
 
     try:
         os.makedirs(target_dir, exist_ok=True)
-        print(f"\nOutput directory confirmed, you dimwit: {target_dir}") # User-interactive dialect
+        print(f"\nOutput directory set to: {target_dir}")
     except OSError as e:
-        print(f"ARE YOU KIDDING ME?! Some shit went wrong trying to create directory '{target_dir}': {e}. You probably fucked it up.") # User-interactive dialect
-        print("Do you even have Termux storage permissions enabled? You need that shit.") # User-interactive dialect
-        print("Go do it now: termux-setup-storage") # User-interactive dialect
-        return
-
-
-    # --- NEW LOGIN/COOKIE HANDLING VARIABLES ---
-    user_username = None
-    user_password = None
-    user_cookie_file = None
-    default_cookie_path = os.path.join(target_dir, 'cookies.txt')
-    # --- END NEW LOGIN/COOKIE HANDLING VARIABLES ---
-
-
-    while True: # Main loop for continuous operation
-        media_url = input("\nGive me the URL of the trash you want to steal (or 'q' to quit, pussy.): ").strip() # User-interactive dialect
-        if media_url.lower() == 'q':
-            break # Exit the loop if user quits
-
-
-        if not media_url:
-            print("ARE YOU FUCKING WITH ME?! Give me a real URL, you absolute waste of space, or do I need to just end your life here and now?") # User-interactive dialect
-            continue # Go back to start of loop if URL is empty
-
-        # --- NEW LOGIN/COOKIE PROMPT ---
-        print("\n--- LOGIN OPTIONS (for sites like FetLife, if needed) ---")
-        print("1. Use an existing cookie file (e.g., from a previous login or browser export)")
-        print("2. Enter username and password (cookies will be saved to your PyPorn folder for next time)")
-        print("3. Continue without login (for public content)")
-
-        login_choice = input("Enter choice (1/2/3): ").strip()
-
-        if login_choice == '1':
-            cookie_path_input = input(f"Enter path to cookie file (e.g., {default_cookie_path}): ").strip()
-            user_cookie_file = os.path.expanduser(cookie_path_input) if cookie_path_input else default_cookie_path
-            print(f"Attempting to use cookies from: {user_cookie_file}")
-            user_username = None # Ensure no conflicting credentials
-            user_password = None
-        elif login_choice == '2':
-            user_username = input("Enter username: ").strip()
-            user_password = input("Enter password: ").strip()
-            print(f"Credentials entered. Cookies will be saved to: {default_cookie_path}")
-            user_cookie_file = None # Ensure no conflicting cookie file
-        elif login_choice == '3':
-            print("Continuing without login.")
-            user_username = None
-            user_password = None
-            user_cookie_file = None
-        else:
-            print("Invalid login choice. Continuing without login.")
-            user_username = None
-            user_password = None
-            user_cookie_file = None
-        # --- END NEW LOGIN/COOKIE PROMPT ---
-
-
-        print("\nFINE, I'm checking your pathetic link...") # User-interactive dialect
-        # Pass login/cookie info to get_media_info
-        info, error_message = get_media_info(media_url, username=user_username, password=user_password, cookie_file=user_cookie_file)
-
-        # --- DEBUG OUTPUT IS NOW HANDLED INSIDE get_media_info FUNCTION ---
-
-        if error_message:
-            print(f"OH, FOR FUCK'S SAKE! Your request failed: {error_message}. You probably gave me a broken link, you idiot. I'll fuckin kill you for playing games with me, be careful.") # User-interactive dialect
-            print("\n--- IMPORTANT, PAY ATTENTION ---") # User-interactive dialect
-            print("If you're getting Cloudflare anti-bot errors, make sure you've installed 'httpx' and 'h2'.") # User-interactive dialect
-            print("In Termux, run: pip install httpx h2. Don't come crying to me if you're too dumb to do it.") # User-interactive dialect
-            if user_username and user_password:
-                print("Also, check your login credentials. You might be a dumbass and typed them wrong.") # User-interactive dialect
-            print("----------------------------------") # User-interactive dialect
-            continue # Go back to start of loop on error
-        
-        if not info:
-            print("I CAN'T FIND THAT SHIT! Did you even bother to check if it's a real URL? I swear to God I'll cut your throat wide open for playing games with me.") # User-interactive dialect
-            continue # Go back to start of loop if no info
-
-
-        # Determine if it's a playlist/multi-entry URL
-        is_multi_item = info.get('_type') == 'playlist' or (info.get('entries') and len(info['entries']) > 1)
-        
-        selected_playlist_items = None # Initialize here for scope, will be updated if multi-item
-
-        if is_multi_item:
-            entries = info.get('entries')
-            if not entries: # Handle case where _type is playlist but entries is empty/missing
-                print("DAMN IT! This was supposed to be a playlist, but it's empty! What kind of garbage URL did you give me?! Try a different one.") # User-interactive dialect
-                continue # Go back to main URL prompt
-
-
-            print(f"\nLOOK AT ALL THIS SHIT I FOUND ({len(entries)} items):") # User-interactive dialect
-            for i, entry in enumerate(entries):
-                title = entry.get('title', f"Item {i+1} (No Title, just like your life)")
-                print(f"{i + 1}. {title}") # User-interactive dialect
-            
-            while True:
-                selection_input = input(
-                    "Which pieces of garbage do you want? (e.g., '1,3,7'), a range (e.g., '1-5'), 'all' of this bullshit, or 'q' to quit, you fuckin pussy!: " # User-interactive dialect
-                ).strip()
-                
-                if selection_input.lower() == 'q':
-                    print("FINE! RUN AWAY, YOU COWARD! I QUIT!") # User-interactive dialect
-                    break # Break out of selection loop and go back to main URL prompt
-
-
-                selected_playlist_items = parse_selection(selection_input, len(entries))
-                if selected_playlist_items is not None and selected_playlist_items != "":
-                    print(f"Alright, you picky bastard, I'll get these specific items: {selected_playlist_items}. Don't fuck it up.") # User-interactive dialect
-                    break # Valid selection, break out of selection loop
-                elif selected_playlist_items == "":
-                    print("ARE YOU SERIOUS?! You have to pick AT LEAST ONE. Try harder loser!") # User-interactive dialect
-                elif selection_input.lower() == 'all':
-                    print("Fine, I'll download all of this digital trash. Happy now, you greedy pig?") # User-interactive dialect
-                    break
-
-
-            if selection_input.lower() == 'q':
-                continue # Go back to main URL prompt if selection was cancelled
-
-
-        print("\nWHAT KIND OF FILTH DO YOU WANT TO STEAL?:") # User-interactive dialect
-        print("1. Video (MP4) - For your pathetic viewing pleasure") # User-interactive dialect
-        print("2. Audio (MP3) - So you can listen to this garbage anywhere") # User-interactive dialect
-        # Removed option 3 for Images
-        # print("3. Thumbnails/Images - Just the tiny pictures, you pervert") 
-        
-        download_type_choice = input("Enter the number for your desired type, if you can even manage that: ").strip() # User-interactive dialect
-
-
-        if download_type_choice == '1': # Video
-            options = get_available_video_formats(info)
-
-
-            if not options:
-                # This message will now be less frequent due to "Best available quality" fallback
-                print("THERE ARE NO VIDEO FORMATS AVAILABLE, YOU IDIOT! It's probably some bullshit that sucks and you're the only one that likes it.. go home to cry and put sand in your vagina while you complain about your extra shy clit and eat ice cream.") # User-interactive dialect
-                print("Don't blame me, blame your terrible taste.") # User-interactive dialect
-                continue
-
-
-            print("\nPICK YOUR POISON, YOU DEGENERATE:") # User-interactive dialect
-            for i, (display_name, _) in enumerate(options): # Use display_name here
-                print(f"{i + 1}. {display_name}") # User-interactive dialect
-
-
-            while True:
-                try:
-                    choice_str = input("Just pick a damn number for the resolution, any number, you simpleton: ").strip() # User-interactive dialect
-                    if not choice_str:
-                        print("YOU HAVE TO PICK ONE, YOU MORON!") # User-interactive dialect
-                        continue
-                   
-                    choice = int(choice_str)
-                    if 1 <= choice <= len(options):
-                        selected_display_name, selected_format_string = options[choice - 1] # Get both
-                        break
-                    else:
-                        print("ARE YOU FUCKING KIDDING ME?! I GAVE YOU A LIST! PICK A NUMBER FROM THE LIST, DUMBASS!") # User-interactive dialect
-                except ValueError:
-                    print("CAN YOU EVEN READ?! THAT'S NOT A NUMBER! PICK A NUMBER FROM THE LIST, YOU FUCKIN RETARD!") # User-interactive dialect
-           
-            download_media(media_url, selected_format_string, target_dir, 'video', selected_playlist_items,
-                           username=user_username, password=user_password, cookie_file=user_cookie_file,
-                           save_cookies_to=default_cookie_path if user_username else None) # Pass login/cookie info
-        
-        elif download_type_choice == '2': # Audio
-            download_media(media_url, None, target_dir, 'audio', selected_playlist_items,
-                           username=user_username, password=user_password, cookie_file=user_cookie_file,
-                           save_cookies_to=default_cookie_path if user_username else None) # Pass login/cookie info
-        
-        # Removed image download option handler
-        # elif download_type_choice == '3': # Images
-        #     download_media(media_url, None, target_dir, 'image', selected_playlist_items,
-        #                    username=user_username, password=user_password, cookie_file=user_cookie_file,
-        #                    save_cookies_to=default_cookie_path if user_username else None)
-
-
-        else:
-            print("WHAT THE FUCK IS WRONG WITH YOU?! YOU CAN'T EVEN READ '1', '2', OR '3'?! THOSE ARE YOUR ONLY OPTIONS, YOU RETARD!") # User-interactive dialect
-            continue
-
-
-        print("\n-------------------------------------------------------") # User-interactive dialect
-
-
-    print("\nExiting PyPorn Media Downloader. Now, GO FUCK YOURSELF AND DON'T COME BACK!") # User-interactive dialect
-
-
-if __name__ == '__main__':
-    main()
-
+        print(f"Error: Could not create directory
